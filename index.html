@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+ <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -27,9 +27,24 @@ import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 
+// ================= TUNING (change these if signs feel off) =================
+const DEBUG        = true;  // little label at the bottom of your view showing what it sees
+const EXT          = 0.85;  // finger counts as straight above this (lower = more lenient)
+const CURL         = 0.72;  // finger counts as curled below this (higher = more lenient)
+const RAISE_BELOW  = 0.55;  // wrist must be higher than (head height - this) in metres
+const CROSS_CLOSE  = 0.035; // fingertip gap (m) that counts as crossed/touching
+const SHRINE_DIST  = 0.5;   // max wrist gap (m) for two-hand shrine sign
+const COFFIN_DIST  = 0.5;   // max wrist gap (m) for the mountain sign
+const COFFIN_TIPS  = 0.09;  // max middle-fingertip gap (m) for the mountain sign
+const SHADOW_DIST  = 0.3;   // max wrist gap (m) for clasped fists
+const GRACE_MS     = 200;   // tracking can drop this long without cancelling a sign
+const HOLD = { void: 250, shrine: 350, coffin: 350, shadow: 350, normal: 600 };
+// ===========================================================================
+
 // ---------- Setup ----------
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 100);
+scene.add(camera);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.xr.enabled = true;
@@ -41,7 +56,6 @@ sun.position.set(2, 5, 2);
 scene.add(sun);
 const ambient = new THREE.AmbientLight(0xffffff, 0.6);
 scene.add(ambient);
-
 scene.fog = new THREE.FogExp2(0x87ceeb, 0.01);
 
 // ---------- World objects ----------
@@ -50,7 +64,6 @@ const ground = new THREE.Mesh(new THREE.CircleGeometry(30, 48), groundMat);
 ground.rotation.x = -Math.PI / 2;
 scene.add(ground);
 
-// Trees (shrink away in some domains)
 const trees = new THREE.Group();
 const treeMat = new THREE.MeshStandardMaterial({ color: 0x2e6b3a });
 for (let i = 0; i < 14; i++) {
@@ -61,7 +74,6 @@ for (let i = 0; i < 14; i++) {
 }
 scene.add(trees);
 
-// Shrine (grows during Malevolent Shrine)
 const shrine = new THREE.Group();
 const shrineMat = new THREE.MeshStandardMaterial({ color: 0x2a0505, emissive: 0x330000 });
 const roofMat = new THREE.MeshStandardMaterial({ color: 0x550a0a, emissive: 0x440000 });
@@ -70,19 +82,18 @@ function box(w, h, d, x, y, z, mat) {
   m.position.set(x, y, z);
   shrine.add(m);
 }
-box(5, 0.3, 4, 0, 0.15, 0, shrineMat);      // base
-box(0.35, 2.6, 0.35, -2, 1.6, 1.4, shrineMat); // pillars
+box(5, 0.3, 4, 0, 0.15, 0, shrineMat);
+box(0.35, 2.6, 0.35, -2, 1.6, 1.4, shrineMat);
 box(0.35, 2.6, 0.35, 2, 1.6, 1.4, shrineMat);
 box(0.35, 2.6, 0.35, -2, 1.6, -1.4, shrineMat);
 box(0.35, 2.6, 0.35, 2, 1.6, -1.4, shrineMat);
-box(5.8, 0.35, 4.8, 0, 3.1, 0, roofMat);    // roof
+box(5.8, 0.35, 4.8, 0, 3.1, 0, roofMat);
 box(3.6, 0.35, 3, 0, 3.5, 0, roofMat);
 box(1.6, 0.35, 1.4, 0, 3.85, 0, roofMat);
 shrine.position.set(0, 0, -7);
 shrine.scale.setScalar(0.001);
 scene.add(shrine);
 
-// Falling / rising particles
 const N = 900;
 const pos = new Float32Array(N * 3);
 for (let i = 0; i < N; i++) {
@@ -99,15 +110,19 @@ scene.add(new THREE.Points(geo, pMat));
 const C = (h) => new THREE.Color(h);
 const WORLDS = {
   normal: { sky: C(0x87ceeb), ground: C(0x3a7d44), tree: C(0x2e6b3a), p: C(0xffffff),
-            size: 0.04, sun: 1.2,  amb: 0.7,  fall: 0,   op: 0,   fog: 0.01,  trees: 1, shrine: 0 },
+            size: 0.04, sun: 1.2,  amb: 0.7,  fall: 0,    op: 0,   fog: 0.01, trees: 1,   shrine: 0 },
   void:   { sky: C(0x000000), ground: C(0x04040a), tree: C(0x111111), p: C(0xffffff),
-            size: 0.035, sun: 0.1, amb: 0.5,  fall: 0.15, op: 1,  fog: 0.0,   trees: 0, shrine: 0 },
+            size: 0.035, sun: 0.1, amb: 0.5,  fall: 0.15, op: 1,   fog: 0.0,  trees: 0,   shrine: 0 },
   shrine: { sky: C(0x3a0000), ground: C(0x1a0505), tree: C(0x2a0a0a), p: C(0xff2222),
-            size: 0.05, sun: 0.4,  amb: 0.35, fall: 14,  op: 0.9, fog: 0.03,  trees: 0, shrine: 1 },
+            size: 0.05, sun: 0.4,  amb: 0.35, fall: 14,   op: 0.9, fog: 0.03, trees: 0,   shrine: 1 },
   coffin: { sky: C(0xff5a1a), ground: C(0x7a1d05), tree: C(0x2a0a05), p: C(0xffaa33),
-            size: 0.06, sun: 0.9,  amb: 0.5,  fall: -2.5, op: 1,  fog: 0.03,  trees: 0, shrine: 0 },
+            size: 0.06, sun: 0.9,  amb: 0.5,  fall: -2.5, op: 1,   fog: 0.03, trees: 0,   shrine: 0 },
   shadow: { sky: C(0x05060d), ground: C(0x0b0b1a), tree: C(0x0a0a14), p: C(0x6b5bff),
             size: 0.05, sun: 0.1,  amb: 0.3,  fall: -0.5, op: 0.8, fog: 0.08, trees: 0.4, shrine: 0 },
+};
+const NAMES = {
+  normal: 'Normal', void: 'Unlimited Void', shrine: 'Malevolent Shrine',
+  coffin: 'Coffin of the Iron Mountain', shadow: 'Chimera Shadow Garden',
 };
 let current = 'normal';
 const skyCol = WORLDS.normal.sky.clone();
@@ -124,67 +139,156 @@ const hands = [0, 1].map((i) => {
 });
 
 const FINGERS = ['index', 'middle', 'ring', 'pinky'];
+const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), v3 = new THREE.Vector3();
 
-function extended(hand, f) {
-  const w = hand.joints['wrist'];
-  const p = hand.joints[`${f}-finger-phalanx-proximal`];
-  const t = hand.joints[`${f}-finger-tip`];
-  if (!w || !p || !t) return null;
-  return w.position.distanceTo(t.position) > w.position.distanceTo(p.position) * 1.5;
+function jp(hand, name) {
+  const j = hand.joints[name];
+  return j ? j.position : null;
 }
 
-// Returns: fist, open, cross, peace, point or null
-function pose(hand) {
-  const e = FINGERS.map((f) => extended(hand, f));
-  if (e.includes(null)) return null;
-  const [i, m, r, p] = e;
-  const n = e.filter(Boolean).length;
-  if (n === 0) return 'fist';
-  if (n === 4) return 'open';
-  if (i && m && !r && !p) {
-    const ti = hand.joints['index-finger-tip'];
-    const tm = hand.joints['middle-finger-tip'];
-    if (ti && tm && ti.position.distanceTo(tm.position) < 0.03) return 'cross'; // fingers crossed/touching
-    return 'peace';
+// How straight a finger is: 1.0 = dead straight, ~0.5 = fully curled.
+// Uses the whole finger's bend, so it works at any hand angle and size.
+function straightness(hand, f) {
+  const pr = jp(hand, `${f}-finger-phalanx-proximal`);
+  const im = jp(hand, `${f}-finger-phalanx-intermediate`);
+  const di = jp(hand, `${f}-finger-phalanx-distal`);
+  const ti = jp(hand, `${f}-finger-tip`);
+  if (!pr || !im || !di || !ti) return null;
+  const total = pr.distanceTo(im) + im.distanceTo(di) + di.distanceTo(ti);
+  if (total < 1e-4) return null;
+  return pr.distanceTo(ti) / total;
+}
+
+// Remember each finger's last state so borderline values don't flicker
+const fingerMemory = [{}, {}];
+function fingerStates(hi) {
+  const out = {};
+  for (const f of FINGERS) {
+    const s = straightness(hands[hi], f);
+    if (s === null) return null;
+    let prev = fingerMemory[hi][f] || false;
+    if (s > EXT) prev = true;
+    else if (s < CURL) prev = false;
+    fingerMemory[hi][f] = prev;
+    out[f] = prev;
   }
-  if (i && !m && !r && !p) return 'point';
-  return null;
+  return out;
 }
 
-const SINGLE = { cross: 'void', fist: 'coffin', point: 'shadow', open: 'normal' };
+// Gojo's sign: middle finger crossed over index finger (or touching)
+function isCrossed(hand) {
+  const iT = jp(hand, 'index-finger-tip'), mT = jp(hand, 'middle-finger-tip');
+  const iB = jp(hand, 'index-finger-phalanx-proximal'), mB = jp(hand, 'middle-finger-phalanx-proximal');
+  const a = jp(hand, 'index-finger-metacarpal'), b = jp(hand, 'pinky-finger-metacarpal');
+  if (!iT || !mT || !iB || !mB || !a || !b) return false;
+  v1.subVectors(b, a).normalize();            // sideways axis of the hand
+  const dTip = v2.subVectors(iT, mT).dot(v1);
+  const dBase = v3.subVectors(iB, mB).dot(v1);
+  const flipped = dTip * dBase < 0;           // fingers swapped sides = crossed
+  return flipped || iT.distanceTo(mT) < CROSS_CLOSE;
+}
+
+function analyze(hi) {
+  const hand = hands[hi];
+  const e = fingerStates(hi);
+  if (!e) return null;
+  const w = jp(hand, 'wrist');
+  const headY = camera.position.y > 0.3 ? camera.position.y : 1.5;
+  const raised = !!w && w.y > headY - RAISE_BELOW;
+  const n = FINGERS.filter((f) => e[f]).length;
+  let pose = 'other';
+  if (n === 0) pose = 'fist';
+  else if (n === 4) pose = 'open';
+  else if (e.index && e.middle && !e.ring && !e.pinky) pose = isCrossed(hand) ? 'cross' : 'peace';
+  else if (e.index && !e.middle && !e.ring && !e.pinky) pose = 'point';
+  return { raised, n, pose };
+}
+
+// ---------- Hold logic (with tracking-drop grace) ----------
+const state = [0, 1, 2].map(() => ({ cand: null, since: 0, fired: false, nullSince: 0 }));
+function update(slot, sign, time) {
+  const st = state[slot];
+  if (sign) {
+    st.nullSince = 0;
+    if (sign !== st.cand) { st.cand = sign; st.since = time; st.fired = false; }
+    else if (!st.fired && time - st.since > (HOLD[sign] || 300)) { current = sign; st.fired = true; }
+  } else if (st.cand) {
+    if (!st.nullSince) st.nullSince = time;
+    if (time - st.nullSince > GRACE_MS) { st.cand = null; st.fired = false; st.nullSince = 0; }
+  }
+}
+
+// ---------- Debug label ----------
+let label = null, ctx = null, lastText = '';
+if (DEBUG) {
+  const cv = document.createElement('canvas');
+  cv.width = 512; cv.height = 128;
+  ctx = cv.getContext('2d');
+  const tex = new THREE.CanvasTexture(cv);
+  label = { cv, tex };
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  spr.scale.set(0.5, 0.125, 1);
+  spr.position.set(0, -0.3, -0.9);
+  spr.renderOrder = 999;
+  camera.add(spr);
+}
+function drawLabel(l1, l2) {
+  const t = l1 + '|' + l2;
+  if (!DEBUG || t === lastText) return;
+  lastText = t;
+  ctx.clearRect(0, 0, 512, 128);
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, 512, 128);
+  ctx.fillStyle = '#fff';
+  ctx.font = '30px sans-serif';
+  ctx.fillText(l1, 14, 50);
+  ctx.fillStyle = '#ffd24a';
+  ctx.fillText(l2, 14, 100);
+  label.tex.needsUpdate = true;
+}
+const desc = (x) => (x ? x.pose + (x.raised ? ' (up)' : ' (low)') : '-');
 
 // ---------- Loop ----------
 const clock = new THREE.Clock();
-const HOLD_MS = 300;
-// slots: 0 = left hand, 1 = right hand, 2 = two-hand sign
-const state = [0, 1, 2].map(() => ({ cand: null, since: 0, fired: false }));
-
-function update(slot, sign, time) {
-  const st = state[slot];
-  if (sign !== st.cand) { st.cand = sign; st.since = time; st.fired = false; }
-  else if (sign && !st.fired && time - st.since > HOLD_MS) {
-    current = sign;
-    st.fired = true;
-  }
-}
 
 renderer.setAnimationLoop((time) => {
   const dt = Math.min(clock.getDelta(), 0.05);
 
-  // Read poses
-  const poses = hands.map((h) => (h.visible ? pose(h) : null));
+  const info = hands.map((h, hi) => (h.visible ? analyze(hi) : null));
+  const a = info[0], b = info[1];
+  const bothUp = !!(a && b && a.raised && b.raised);
 
-  // One-hand domains
-  update(0, SINGLE[poses[0]] || null, time);
-  update(1, SINGLE[poses[1]] || null, time);
-
-  // Two-hand domain: both hands peace sign and close together
-  let two = null;
-  if (poses[0] === 'peace' && poses[1] === 'peace') {
-    const w0 = hands[0].joints['wrist'], w1 = hands[1].joints['wrist'];
-    if (w0 && w1 && w0.position.distanceTo(w1.position) < 0.35) two = 'shrine';
+  // Two-hand domains (both hands must be raised)
+  let two = null, wd = 99;
+  if (a && b) {
+    const w0 = jp(hands[0], 'wrist'), w1 = jp(hands[1], 'wrist');
+    if (w0 && w1) wd = w0.distanceTo(w1);
+  }
+  if (bothUp) {
+    const isIM = (x) => x.pose === 'peace' || x.pose === 'cross';
+    if (a.pose === 'fist' && b.pose === 'fist' && wd < SHADOW_DIST) {
+      two = 'shadow';                                   // clasped fists
+    } else if (isIM(a) && isIM(b) && wd < SHRINE_DIST) {
+      two = 'shrine';                                   // two-finger sign, both hands
+    } else if (a.n === 4 && b.n === 4 && wd < COFFIN_DIST) {
+      const m0 = jp(hands[0], 'middle-finger-tip'), m1 = jp(hands[1], 'middle-finger-tip');
+      if (m0 && m1 && m0.distanceTo(m1) < COFFIN_TIPS) two = 'coffin'; // mountain shape
+    }
   }
   update(2, two, time);
+
+  // One-hand signs (hand must be raised, and not part of a two-hand sign)
+  for (let hi = 0; hi < 2; hi++) {
+    const inf = info[hi];
+    let s = null;
+    if (!two && inf && inf.raised) {
+      if (inf.pose === 'cross') s = 'void';             // Gojo
+      else if (inf.pose === 'open' && !(bothUp && wd < 0.6)) s = 'normal'; // raised palm = reset
+    }
+    update(hi, s, time);
+  }
+
+  drawLabel('L: ' + desc(a) + '   R: ' + desc(b), 'Domain: ' + NAMES[current]);
 
   // Blend toward current domain
   const W = WORLDS[current];
@@ -207,15 +311,14 @@ renderer.setAnimationLoop((time) => {
   shrine.scale.setScalar(Math.max(0.001, ss));
   shrine.visible = ss > 0.01;
 
-  // Move particles (positive = fall, negative = rise)
-  const a = geo.attributes.position;
+  const arr = geo.attributes.position;
   for (let i = 0; i < N; i++) {
-    let y = a.getY(i) - fallSpeed * dt;
+    let y = arr.getY(i) - fallSpeed * dt;
     if (y < 0) y += 8;
     if (y > 8) y -= 8;
-    a.setY(i, y);
+    arr.setY(i, y);
   }
-  a.needsUpdate = true;
+  arr.needsUpdate = true;
 
   renderer.render(scene, camera);
 });
